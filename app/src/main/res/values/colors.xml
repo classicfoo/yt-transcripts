@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#17231E</color>
+    <color name="muted">#64736B</color>
+    <color name="green">#146C54</color>
+    <color name="green_dark">#105541</color>
+    <color name="green_soft">#E3F2EA</color>
+    <color name="paper">#F4F7F4</color>
+    <color name="line">#D6E1D9</color>
+    <color name="white">#FFFFFF</color>
+    <color name="error">#A23838</color>
+</resources>
