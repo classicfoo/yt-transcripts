@@ -116,7 +116,7 @@ public final class MainActivity extends Activity {
         executor.execute(() -> {
             try {
                 YouTubeTranscriptService.Transcript fetched =
-                        new YouTubeTranscriptService().fetch(input);
+                        new YouTubeTranscriptService(MainActivity.this).fetch(input);
                 runOnUiThread(() -> {
                     transcript = fetched;
                     suggestedFileName = safeFileName(fetched.title) + ".txt";

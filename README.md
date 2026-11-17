@@ -8,6 +8,7 @@ to a `.txt` file using Android's file picker. Videos must have captions enabled.
 
 - Accepts regular YouTube links, Shorts, live links, embeds, and `youtu.be` links.
 - Prefers human-authored captions, then English captions, then the first available track.
+- Retries auto-generated captions through YouTube's Android player if its web caption feed is empty.
 - Displays a preview, caption language, and word count before saving.
 - Writes a UTF-8 text file with the video title, source link, language, and transcript.
 - Sends requests directly from the device to YouTube; there is no account or app server.
@@ -23,9 +24,9 @@ Obtainium can check the repository's GitHub Releases for future APK updates.
 ## Limitations
 
 YouTube may not expose captions for private, age-restricted, or caption-disabled videos.
-YouTube can also change its page and caption endpoints, so a future app update may be
-needed if that happens. The app fetches caption text only and does not download video
-or audio.
+Some caption feeds require a session token or may be blocked on a network; YouTube can
+also change its player and caption endpoints, so a future app update may be needed. The
+app fetches caption text only and does not download video or audio.
 
 ## Build
 

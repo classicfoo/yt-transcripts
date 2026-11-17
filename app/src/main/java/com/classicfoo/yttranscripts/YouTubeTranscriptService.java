@@ -1,6 +1,10 @@
 package com.classicfoo.yttranscripts;
 
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.util.Xml;
 
 import org.json.JSONArray;
@@ -9,12 +13,15 @@ import org.xmlpull.v1.XmlPullParser;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class YouTubeTranscriptService {
@@ -22,6 +29,16 @@ final class YouTubeTranscriptService {
             + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     private static final int MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
     private static final Pattern VIDEO_ID = Pattern.compile("^[A-Za-z0-9_-]{11}$");
+    private static final Pattern API_KEY = Pattern.compile("\"INNERTUBE_API_KEY\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern VISITOR_DATA = Pattern.compile("\"visitorData\"\\s*:\\s*\"([^\"]+)\"");
+    private static final String ANDROID_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
+    private static final String DEFAULT_ANDROID_CLIENT_VERSION = "21.26.364";
+
+    private final Context context;
+
+    YouTubeTranscriptService(Context context) {
+        this.context = context.getApplicationContext();
+    }
 
     Transcript fetch(String inputUrl) throws Exception {
         String videoId = extractVideoId(inputUrl);
@@ -49,37 +66,38 @@ final class YouTubeTranscriptService {
         JSONObject captions = player.optJSONObject("captions");
         JSONObject renderer = captions == null ? null : captions.optJSONObject("playerCaptionsTracklistRenderer");
         JSONArray tracks = renderer == null ? null : renderer.optJSONArray("captionTracks");
-        if (tracks == null || tracks.length() == 0) {
-            throw new TranscriptException("No captions are available for this video.");
-        }
-
-        JSONObject chosenTrack = chooseTrack(tracks);
-        if (chosenTrack == null) throw new TranscriptException("No readable caption track was found.");
-        String baseUrl = chosenTrack.optString("baseUrl", "");
-        if (baseUrl.isEmpty()) throw new TranscriptException("YouTube did not provide a caption link.");
-
-        String trackLanguage = chosenTrack.optString("languageCode", "");
-        String trackName = captionTrackName(chosenTrack);
-        boolean automatic = "asr".equals(chosenTrack.optString("kind", ""));
-        String languageLabel = trackName.isEmpty() ? trackLanguage : trackName;
-        if (languageLabel.isEmpty()) languageLabel = "Original captions";
-        if (automatic) languageLabel += " · auto-generated";
-
-        String text;
-        try {
-            text = parseJson3(request(withFormat(baseUrl, "json3")));
-        } catch (Exception jsonError) {
-            text = "";
-        }
-        if (text.isEmpty()) {
+        JSONObject chosenTrack = tracks == null ? null : chooseTrack(tracks);
+        String text = "";
+        String languageLabel = "Original captions";
+        if (chosenTrack != null) {
+            languageLabel = captionLanguageLabel(chosenTrack);
             try {
-                text = parseSrv3(request(withFormat(baseUrl, "srv3")));
-            } catch (Exception xmlError) {
-                if (xmlError instanceof TranscriptException) throw xmlError;
-                throw new TranscriptException("YouTube listed captions but wouldn't return their text. Please try again later.");
+                text = fetchTrackText(chosenTrack.optString("baseUrl", ""));
+            } catch (Exception ignored) {
+                // Fall back to the Android player when the WEB caption URL is blocked.
             }
         }
-        if (text.trim().isEmpty()) throw new TranscriptException("The caption track was empty.");
+
+        if (text.trim().isEmpty()) {
+            try {
+                AndroidCaptions androidCaptions = fetchAndroidCaptions(videoId, page);
+                if (androidCaptions.track != null) {
+                    String androidText = fetchTrackText(androidCaptions.track.optString("baseUrl", ""));
+                    if (!androidText.trim().isEmpty()) {
+                        text = androidText;
+                        languageLabel = captionLanguageLabel(androidCaptions.track);
+                        if (details == null || "YouTube transcript".equals(title)) {
+                            title = androidCaptions.title;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // Report one actionable caption-specific error below.
+            }
+        }
+        if (text.trim().isEmpty()) {
+            throw new TranscriptException("YouTube lists captions, but returned no transcript text. Its web feed may require a token, and the Android player request was blocked. Try again later or on a different network.");
+        }
 
         int words = countWords(text);
         return new Transcript(title, languageLabel, text, words);
@@ -172,6 +190,102 @@ final class YouTubeTranscriptService {
         return best;
     }
 
+    private String fetchTrackText(String baseUrl) throws Exception {
+        if (baseUrl == null || baseUrl.isEmpty()) return "";
+        try {
+            String json3 = parseJson3(request(withFormat(baseUrl, "json3")));
+            if (!json3.isEmpty()) return json3;
+        } catch (Exception ignored) {
+            // Some track URLs only support the XML caption format.
+        }
+        try {
+            return parseSrv3(request(withFormat(baseUrl, "srv3")));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private AndroidCaptions fetchAndroidCaptions(String videoId, String watchPage)
+            throws Exception {
+        String version = installedYouTubeVersion();
+        String userAgent = "com.google.android.youtube/" + version + " (Linux; U; Android "
+                + Build.VERSION.RELEASE + ") gzip";
+        String language = Locale.getDefault().getLanguage();
+        String country = Locale.getDefault().getCountry();
+
+        JSONObject client = new JSONObject();
+        client.put("clientName", "ANDROID");
+        client.put("clientVersion", version);
+        client.put("androidSdkVersion", Build.VERSION.SDK_INT);
+        client.put("deviceMake", Build.MANUFACTURER);
+        client.put("deviceModel", Build.MODEL);
+        client.put("osName", "Android");
+        client.put("osVersion", Build.VERSION.RELEASE);
+        client.put("hl", language.isEmpty() ? "en" : language);
+        client.put("gl", country.isEmpty() ? "US" : country);
+        client.put("timeZone", TimeZone.getDefault().getID());
+        client.put("userAgent", userAgent);
+        Matcher visitorMatch = VISITOR_DATA.matcher(watchPage);
+        String visitorData = visitorMatch.find() ? visitorMatch.group(1) : "";
+        if (!visitorData.isEmpty()) client.put("visitorData", visitorData);
+
+        JSONObject requestContext = new JSONObject();
+        requestContext.put("client", client);
+        JSONObject body = new JSONObject();
+        body.put("videoId", videoId);
+        body.put("context", requestContext);
+        body.put("contentCheckOk", true);
+        body.put("racyCheckOk", true);
+
+        Matcher keyMatch = API_KEY.matcher(watchPage);
+        String apiKey = keyMatch.find() ? keyMatch.group(1) : ANDROID_API_KEY;
+        String endpoint = "https://www.youtube.com/youtubei/v1/player?key=" + apiKey
+                + "&prettyPrint=false";
+        JSONObject player = new JSONObject(postJson(endpoint, body, userAgent, version, visitorData));
+
+        JSONObject playability = player.optJSONObject("playabilityStatus");
+        if (playability != null && !"OK".equals(playability.optString("status", ""))) {
+            throw new TranscriptException("YouTube blocked the Android caption request: "
+                    + playability.optString("reason", "video unavailable"));
+        }
+
+        JSONObject details = player.optJSONObject("videoDetails");
+        String title = details == null ? "YouTube transcript"
+                : details.optString("title", "YouTube transcript");
+        JSONObject captions = player.optJSONObject("captions");
+        JSONObject renderer = captions == null ? null
+                : captions.optJSONObject("playerCaptionsTracklistRenderer");
+        JSONArray tracks = renderer == null ? null : renderer.optJSONArray("captionTracks");
+        return new AndroidCaptions(title, tracks == null ? null : chooseTrack(tracks));
+    }
+
+    private String installedYouTubeVersion() {
+        try {
+            PackageInfo packageInfo;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageInfo = context.getPackageManager().getPackageInfo("com.google.android.youtube",
+                        PackageManager.PackageInfoFlags.of(0));
+            } else {
+                packageInfo = context.getPackageManager().getPackageInfo("com.google.android.youtube", 0);
+            }
+            if (packageInfo.versionName != null && !packageInfo.versionName.trim().isEmpty()) {
+                return packageInfo.versionName;
+            }
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // Keep a recent fallback for devices without the YouTube app installed.
+        }
+        return DEFAULT_ANDROID_CLIENT_VERSION;
+    }
+
+    private String captionLanguageLabel(JSONObject track) {
+        String language = track.optString("languageCode", "");
+        String name = captionTrackName(track);
+        String label = name.isEmpty() ? language : name;
+        if (label.isEmpty()) label = "Original captions";
+        if ("asr".equals(track.optString("kind", ""))) label += " · auto-generated";
+        return label;
+    }
+
     private String captionTrackName(JSONObject track) {
         JSONObject name = track.optJSONObject("name");
         if (name == null) return "";
@@ -194,14 +308,40 @@ final class YouTubeTranscriptService {
     }
 
     private String request(String address) throws Exception {
+        return request(address, "GET", null, USER_AGENT, null, null);
+    }
+
+    private String postJson(String address, JSONObject body, String userAgent, String clientVersion,
+                            String visitorData) throws Exception {
+        return request(address, "POST", body.toString().getBytes(StandardCharsets.UTF_8),
+                userAgent, clientVersion, visitorData);
+    }
+
+    private String request(String address, String method, byte[] requestBody, String userAgent,
+                           String clientVersion, String visitorData) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         connection.setConnectTimeout(15000);
         connection.setReadTimeout(25000);
         connection.setInstanceFollowRedirects(true);
-        connection.setRequestMethod("GET");
-        connection.setRequestProperty("User-Agent", USER_AGENT);
+        connection.setRequestMethod(method);
+        connection.setRequestProperty("User-Agent", userAgent);
         connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
         connection.setRequestProperty("Accept", "text/html,application/json,application/xml,text/xml,*/*;q=0.8");
+        if (clientVersion != null) {
+            connection.setRequestProperty("X-YouTube-Client-Name", "3");
+            connection.setRequestProperty("X-YouTube-Client-Version", clientVersion);
+            connection.setRequestProperty("X-YouTube-Bootstrap-Logged-In", "false");
+        }
+        if (visitorData != null && !visitorData.isEmpty()) {
+            connection.setRequestProperty("X-Goog-Visitor-Id", visitorData);
+        }
+        if (requestBody != null) {
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+            }
+        }
         try {
             int status = connection.getResponseCode();
             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
@@ -285,6 +425,16 @@ final class YouTubeTranscriptService {
             this.languageLabel = languageLabel;
             this.text = text;
             this.wordCount = wordCount;
+        }
+    }
+
+    private static final class AndroidCaptions {
+        final String title;
+        final JSONObject track;
+
+        AndroidCaptions(String title, JSONObject track) {
+            this.title = title;
+            this.track = track;
         }
     }
 
