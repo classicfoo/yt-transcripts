@@ -1,11 +1,14 @@
 package com.classicfoo.yttranscripts;
 
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
@@ -26,6 +29,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -45,7 +51,6 @@ public final class MainActivity extends Activity {
 
     private YouTubeTranscriptService.Transcript transcript;
     private String sourceUrl;
-    private String suggestedFileName;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -60,6 +65,20 @@ public final class MainActivity extends Activity {
         statusText = findViewById(R.id.status_text);
         detailText = findViewById(R.id.detail_text);
         previewText = findViewById(R.id.preview_text);
+        ScrollView previewScroll = findViewById(R.id.preview_scroll);
+        previewScroll.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_DOWN
+                    || action == android.view.MotionEvent.ACTION_MOVE) {
+                view.getParent().requestDisallowInterceptTouchEvent(true);
+            } else if (action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                view.getParent().requestDisallowInterceptTouchEvent(false);
+            }
+            return false;
+        });
+        saveButton.setText(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                ? "Save to Downloads" : "Save as .txt");
 
         fetchButton.setOnClickListener(view -> fetchTranscript());
         saveButton.setOnClickListener(view -> saveTranscript());
@@ -122,7 +141,6 @@ public final class MainActivity extends Activity {
                         new YouTubeTranscriptService(MainActivity.this).fetch(input);
                 runOnUiThread(() -> {
                     transcript = fetched;
-                    suggestedFileName = safeFileName(fetched.title) + ".txt";
                     statusText.setText(fetched.title);
                     detailText.setText(fetched.languageLabel + "  ·  "
                             + fetched.wordCount + " words");
@@ -167,11 +185,17 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        String fileName = uniqueFileName(transcript.title);
+        saveButton.setEnabled(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveToDownloads(fileName);
+            return;
+        }
+
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("text/plain");
-        intent.putExtra(Intent.EXTRA_TITLE, suggestedFileName);
-        saveButton.setEnabled(false);
+        intent.putExtra(Intent.EXTRA_TITLE, fileName);
         try {
             startActivityForResult(intent, CREATE_TEXT_FILE);
         } catch (Exception error) {
@@ -195,18 +219,8 @@ public final class MainActivity extends Activity {
 
         Uri destination = data.getData();
         boolean saved = false;
-        try (InputStream input = openFileInput(PENDING_EXPORT_FILE);
-             OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
-            if (output == null) throw new IllegalStateException("Could not open the selected file");
-            byte[] buffer = new byte[8192];
-            int totalBytes = 0;
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-                totalBytes += read;
-            }
-            output.flush();
-            if (totalBytes == 0) throw new IllegalStateException("The transcript file was empty");
+        try {
+            copyPendingExport(destination);
             saved = true;
         } catch (Exception error) {
             Toast.makeText(this, "Couldn't save the transcript: " + error.getMessage(),
@@ -218,9 +232,71 @@ public final class MainActivity extends Activity {
         if (saved) Toast.makeText(this, "Transcript saved", Toast.LENGTH_SHORT).show();
     }
 
+    private void saveToDownloads(String fileName) {
+        Uri destination = null;
+        boolean saved = false;
+        try {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            destination = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values);
+            if (destination == null) {
+                throw new IllegalStateException("Android couldn't create a file in Downloads");
+            }
+
+            copyPendingExport(destination);
+            ContentValues published = new ContentValues();
+            published.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            if (getContentResolver().update(destination, published, null, null) == 0) {
+                throw new IllegalStateException("Android couldn't finish the Downloads file");
+            }
+            saved = true;
+        } catch (Exception error) {
+            Toast.makeText(this, "Couldn't save to Downloads: " + error.getMessage(),
+                    Toast.LENGTH_LONG).show();
+        } finally {
+            if (!saved && destination != null) {
+                try {
+                    getContentResolver().delete(destination, null, null);
+                } catch (Exception ignored) {
+                    // Keep the original save error visible if cleanup also fails.
+                }
+            }
+            deleteFile(PENDING_EXPORT_FILE);
+            saveButton.setEnabled(transcript != null);
+        }
+        if (saved) Toast.makeText(this, "Saved to Downloads", Toast.LENGTH_SHORT).show();
+    }
+
+    private void copyPendingExport(Uri destination) throws Exception {
+        try (InputStream input = openFileInput(PENDING_EXPORT_FILE);
+             OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+            if (output == null) throw new IllegalStateException("Could not open the selected file");
+            byte[] buffer = new byte[8192];
+            int totalBytes = 0;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+                totalBytes += read;
+            }
+            output.flush();
+            if (totalBytes == 0) throw new IllegalStateException("The transcript file was empty");
+        }
+    }
+
+    private String uniqueFileName(String title) {
+        String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US)
+                .format(new Date());
+        return safeFileName(title) + " (" + timestamp + ").txt";
+    }
+
     private String safeFileName(String title) {
         String cleaned = title.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_")
-                .replaceAll("\\s+", " ").trim();
+                .replaceAll("\\s+", " ").trim()
+                .replaceAll("[. ]+$", "");
         if (cleaned.length() > 100) cleaned = cleaned.substring(0, 100).trim();
         return cleaned.isEmpty() ? "youtube-transcript" : cleaned;
     }

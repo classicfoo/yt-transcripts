@@ -142,20 +142,23 @@
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
 
-            <TextView
-                android:id="@+id/preview_text"
+            <ScrollView
+                android:id="@+id/preview_scroll"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="220dp"
                 android:layout_marginTop="16dp"
                 android:background="@drawable/input_background"
-                android:ellipsize="end"
-                android:fontFamily="monospace"
-                android:maxHeight="220dp"
-                android:maxLines="9"
-                android:padding="12dp"
-                android:scrollbars="vertical"
-                android:textColor="@color/ink"
-                android:textSize="13sp" />
+                android:scrollbars="vertical">
+
+                <TextView
+                    android:id="@+id/preview_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:padding="12dp"
+                    android:textColor="@color/ink"
+                    android:textSize="13sp" />
+            </ScrollView>
 
             <Button
                 android:id="@+id/save_button"
