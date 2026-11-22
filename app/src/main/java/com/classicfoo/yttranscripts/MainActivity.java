@@ -22,13 +22,16 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int CREATE_TEXT_FILE = 4107;
+    private static final String PENDING_EXPORT_FILE = "pending-transcript.txt";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private EditText urlInput;
@@ -147,35 +150,72 @@ public final class MainActivity extends Activity {
     private void saveTranscript() {
         if (transcript == null) return;
 
+        try (OutputStream output = openFileOutput(PENDING_EXPORT_FILE, MODE_PRIVATE);
+             OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
+            writer.write("Title: ");
+            writer.write(transcript.title);
+            writer.write("\nSource: ");
+            writer.write(sourceUrl);
+            writer.write("\nLanguage: ");
+            writer.write(transcript.languageLabel);
+            writer.write("\n\n");
+            writer.write(transcript.text);
+            writer.write('\n');
+        } catch (Exception error) {
+            Toast.makeText(this, "Couldn't prepare the transcript: " + error.getMessage(),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("text/plain");
         intent.putExtra(Intent.EXTRA_TITLE, suggestedFileName);
-        startActivityForResult(intent, CREATE_TEXT_FILE);
+        saveButton.setEnabled(false);
+        try {
+            startActivityForResult(intent, CREATE_TEXT_FILE);
+        } catch (Exception error) {
+            deleteFile(PENDING_EXPORT_FILE);
+            saveButton.setEnabled(transcript != null);
+            Toast.makeText(this, "Couldn't open the file picker: " + error.getMessage(),
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != CREATE_TEXT_FILE || resultCode != RESULT_OK || data == null
-                || data.getData() == null || transcript == null) return;
+        if (requestCode != CREATE_TEXT_FILE) return;
+
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            deleteFile(PENDING_EXPORT_FILE);
+            saveButton.setEnabled(transcript != null);
+            return;
+        }
 
         Uri destination = data.getData();
-        try (OutputStream output = getContentResolver().openOutputStream(destination)) {
+        boolean saved = false;
+        try (InputStream input = openFileInput(PENDING_EXPORT_FILE);
+             OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
             if (output == null) throw new IllegalStateException("Could not open the selected file");
-            output.write(buildTextFile().getBytes(StandardCharsets.UTF_8));
-            Toast.makeText(this, "Transcript saved", Toast.LENGTH_SHORT).show();
+            byte[] buffer = new byte[8192];
+            int totalBytes = 0;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+                totalBytes += read;
+            }
+            output.flush();
+            if (totalBytes == 0) throw new IllegalStateException("The transcript file was empty");
+            saved = true;
         } catch (Exception error) {
             Toast.makeText(this, "Couldn't save the transcript: " + error.getMessage(),
                     Toast.LENGTH_LONG).show();
+        } finally {
+            deleteFile(PENDING_EXPORT_FILE);
+            saveButton.setEnabled(transcript != null);
         }
-    }
-
-    private String buildTextFile() {
-        return "Title: " + transcript.title + "\n"
-                + "Source: " + sourceUrl + "\n"
-                + "Language: " + transcript.languageLabel + "\n\n"
-                + transcript.text + "\n";
+        if (saved) Toast.makeText(this, "Transcript saved", Toast.LENGTH_SHORT).show();
     }
 
     private String safeFileName(String title) {
