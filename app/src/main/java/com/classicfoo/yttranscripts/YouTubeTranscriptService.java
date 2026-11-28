@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.util.Xml;
+import android.webkit.WebSettings;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -25,7 +26,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class YouTubeTranscriptService {
-    private static final String USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    private static final String FALLBACK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     private static final int MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
     private static final Pattern VIDEO_ID = Pattern.compile("^[A-Za-z0-9_-]{11}$");
@@ -69,11 +70,14 @@ final class YouTubeTranscriptService {
         JSONObject chosenTrack = tracks == null ? null : chooseTrack(tracks);
         String text = "";
         String languageLabel = "Original captions";
+        String webCaptionError = null;
+        String androidCaptionError = null;
         if (chosenTrack != null) {
             languageLabel = captionLanguageLabel(chosenTrack);
             try {
                 text = fetchTrackText(chosenTrack.optString("baseUrl", ""));
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                webCaptionError = error.getMessage();
                 // Fall back to the Android player when the WEB caption URL is blocked.
             }
         }
@@ -82,7 +86,10 @@ final class YouTubeTranscriptService {
             try {
                 AndroidCaptions androidCaptions = fetchAndroidCaptions(videoId, page);
                 if (androidCaptions.track != null) {
-                    String androidText = fetchTrackText(androidCaptions.track.optString("baseUrl", ""));
+                    String androidText = fetchTrackText(
+                            androidCaptions.track.optString("baseUrl", ""),
+                            androidCaptions.userAgent, androidCaptions.clientVersion,
+                            androidCaptions.visitorData);
                     if (!androidText.trim().isEmpty()) {
                         text = androidText;
                         languageLabel = captionLanguageLabel(androidCaptions.track);
@@ -91,12 +98,33 @@ final class YouTubeTranscriptService {
                         }
                     }
                 }
-            } catch (Exception ignored) {
-                // Report one actionable caption-specific error below.
+            } catch (Exception error) {
+                androidCaptionError = error.getMessage();
             }
         }
         if (text.trim().isEmpty()) {
-            throw new TranscriptException("YouTube lists captions, but returned no transcript text. Its web feed may require a token, and the Android player request was blocked. Try again later or on a different network.");
+            String reason = playability == null ? ""
+                    : playability.optString("reason", "");
+            String status = playability == null ? ""
+                    : playability.optString("status", "");
+            if (reason.toLowerCase(Locale.ROOT).contains("bot")
+                    || "LOGIN_REQUIRED".equals(status)) {
+                throw new TranscriptException("YouTube asked the app to verify the request, so it couldn't reach the captions. Try again later or on a different network.");
+            }
+            if (chosenTrack == null && (tracks == null || tracks.length() == 0)) {
+                if (androidCaptionError != null && !androidCaptionError.trim().isEmpty()) {
+                    throw new TranscriptException("YouTube didn't expose a caption track. "
+                            + androidCaptionError);
+                }
+                throw new TranscriptException("YouTube didn't expose any captions for this video.");
+            }
+            String requestError = androidCaptionError != null
+                    ? androidCaptionError : webCaptionError;
+            if (requestError != null && !requestError.trim().isEmpty()) {
+                throw new TranscriptException("YouTube listed captions but blocked the text request: "
+                        + requestError);
+            }
+            throw new TranscriptException("YouTube listed captions, but returned no transcript text. Its caption service may require playback verification. Try again later or on a different network.");
         }
 
         int words = countWords(text);
@@ -191,18 +219,29 @@ final class YouTubeTranscriptService {
     }
 
     private String fetchTrackText(String baseUrl) throws Exception {
+        return fetchTrackText(baseUrl, defaultUserAgent(), null, null);
+    }
+
+    private String fetchTrackText(String baseUrl, String userAgent, String clientVersion,
+                                  String visitorData) throws Exception {
         if (baseUrl == null || baseUrl.isEmpty()) return "";
+        Exception firstError = null;
         try {
-            String json3 = parseJson3(request(withFormat(baseUrl, "json3")));
+            String json3 = parseJson3(request(withFormat(baseUrl, "json3"), userAgent,
+                    clientVersion, visitorData));
             if (!json3.isEmpty()) return json3;
-        } catch (Exception ignored) {
+        } catch (Exception error) {
+            firstError = error;
             // Some track URLs only support the XML caption format.
         }
         try {
-            return parseSrv3(request(withFormat(baseUrl, "srv3")));
-        } catch (Exception ignored) {
-            return "";
+            String srv3 = parseSrv3(request(withFormat(baseUrl, "srv3"), userAgent,
+                    clientVersion, visitorData));
+            if (!srv3.isEmpty()) return srv3;
+        } catch (Exception error) {
+            if (firstError != null) throw error;
         }
+        return "";
     }
 
     private AndroidCaptions fetchAndroidCaptions(String videoId, String watchPage)
@@ -256,7 +295,8 @@ final class YouTubeTranscriptService {
         JSONObject renderer = captions == null ? null
                 : captions.optJSONObject("playerCaptionsTracklistRenderer");
         JSONArray tracks = renderer == null ? null : renderer.optJSONArray("captionTracks");
-        return new AndroidCaptions(title, tracks == null ? null : chooseTrack(tracks));
+        return new AndroidCaptions(title, tracks == null ? null : chooseTrack(tracks),
+                version, userAgent, visitorData);
     }
 
     private String installedYouTubeVersion() {
@@ -308,7 +348,22 @@ final class YouTubeTranscriptService {
     }
 
     private String request(String address) throws Exception {
-        return request(address, "GET", null, USER_AGENT, null, null);
+        return request(address, "GET", null, defaultUserAgent(), null, null);
+    }
+
+    private String defaultUserAgent() {
+        try {
+            String userAgent = WebSettings.getDefaultUserAgent(context);
+            if (userAgent != null && !userAgent.trim().isEmpty()) return userAgent;
+        } catch (Exception ignored) {
+            // Keep the static fallback for devices where Android can't provide a WebView UA.
+        }
+        return FALLBACK_USER_AGENT;
+    }
+
+    private String request(String address, String userAgent, String clientVersion,
+                           String visitorData) throws Exception {
+        return request(address, "GET", null, userAgent, clientVersion, visitorData);
     }
 
     private String postJson(String address, JSONObject body, String userAgent, String clientVersion,
@@ -431,10 +486,17 @@ final class YouTubeTranscriptService {
     private static final class AndroidCaptions {
         final String title;
         final JSONObject track;
+        final String clientVersion;
+        final String userAgent;
+        final String visitorData;
 
-        AndroidCaptions(String title, JSONObject track) {
+        AndroidCaptions(String title, JSONObject track, String clientVersion, String userAgent,
+                        String visitorData) {
             this.title = title;
             this.track = track;
+            this.clientVersion = clientVersion;
+            this.userAgent = userAgent;
+            this.visitorData = visitorData;
         }
     }
 
