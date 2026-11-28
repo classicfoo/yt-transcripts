@@ -9,16 +9,17 @@ to a `.txt` file in Downloads. Videos must have captions enabled.
 - Accepts regular YouTube links, Shorts, live links, embeds, and `youtu.be` links.
 - Prefers human-authored captions, then English captions, then the first available track.
 - Retries auto-generated captions through YouTube's Android player if its web caption feed is empty.
-- Displays a scrollable preview, caption language, and word count before saving.
+- Displays a scrollable transcript preview, caption language, and word count.
 - Writes a UTF-8 text file with the video title, source link, language, and transcript.
-- Saves directly to Downloads on Android 10 and newer; older devices use Android's file picker.
+- Reads a copied YouTube link when the app opens, then downloads the transcript to Downloads and opens ChatGPT after one tap.
+- Saves directly to Downloads on Android 10 and newer; older devices request storage permission once.
 - Sends requests directly from the device to YouTube; there is no account or app server.
 
 ## Install with Obtainium
 
 1. Add `https://github.com/classicfoo/yt-transcripts` as an app source in Obtainium.
 2. Install the latest release APK offered by the repository.
-3. Paste a public YouTube video link, tap **Get transcript**, then save to Downloads.
+3. Copy a public YouTube video link, open the app, and tap **Download & open ChatGPT**.
 
 Obtainium can check the repository's GitHub Releases for future APK updates.
 

@@ -83,7 +83,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
                 android:lineSpacingExtra="2dp"
-                android:text="Works with public videos that have captions available."
+                android:text="Copy a YouTube link first. Tap once to download its transcript and open ChatGPT. Captions must be available."
                 android:textColor="@color/muted"
                 android:textSize="13sp" />
 
@@ -99,7 +99,7 @@
                     android:background="@drawable/primary_button"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
-                    android:text="Get transcript"
+                    android:text="Download &amp; open ChatGPT"
                     android:textAllCaps="false"
                     android:textColor="@color/white"
                     android:textSize="16sp"
@@ -160,19 +160,6 @@
                     android:textSize="13sp" />
             </ScrollView>
 
-            <Button
-                android:id="@+id/save_button"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:layout_marginTop="14dp"
-                android:background="@drawable/secondary_button"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:text="Save as .txt"
-                android:textAllCaps="false"
-                android:textColor="@color/green_dark"
-                android:textSize="15sp"
-                android:textStyle="bold" />
         </LinearLayout>
 
         <TextView
